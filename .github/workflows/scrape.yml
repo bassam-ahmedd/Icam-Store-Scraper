@@ -28,7 +28,7 @@ jobs:
       - name: Run scraper
         env:
           ZENROWS_API_KEY:   ${{ secrets.ZENROWS_API_KEY }}
-          SHEET_ID:          ${{ secrets.SHEET_ID }}
+          SHEET_ID:          ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           PROXY_COUNTRY:     ae
         run: python icamstore_scraper.py
