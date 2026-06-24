@@ -379,24 +379,61 @@ def write_tab(spreadsheet, tab_name: str, rows: list):
     log.info("  wrote %s rows to tab '%s'", len(rows), tab_name)
 
 
-def write_run_log(spreadsheet, summary: list):
-    tab = "_Run Log"
+def is_sold_out(avail_text: str) -> bool:
+    t = (avail_text or "").lower()
+    return ("out of stock" in t) or ("sold out" in t) or ("unavailable" in t)
+
+
+def write_summary(spreadsheet, summary: list):
+    """Summary tab: Category | Products | In Stock | Sold Out, pinned first.
+
+    `summary` rows are [category_name, products, in_stock, sold_out].
+    """
+    tab = "Summary"
     try:
         ws = spreadsheet.worksheet(tab)
         ws.clear()
     except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab, rows=50, cols=3)
+        ws = spreadsheet.add_worksheet(title=tab, rows=60, cols=4, index=0)
+
     from datetime import datetime
     try:
         import zoneinfo
-        now = datetime.now(zoneinfo.ZoneInfo("Asia/Dubai")).strftime("%Y-%m-%d %H:%M:%S %Z")
+        now = datetime.now(zoneinfo.ZoneInfo("Asia/Dubai")).strftime("%Y-%m-%d %H:%M") + " +04"
     except Exception:
-        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    values = [["Last run", now], ["", ""], ["Category tab", "Products"]]
-    values += summary
-    values += [["", ""], ["TOTAL", str(sum(int(s[1]) for s in summary))]]
-    ws.update(range_name="A1", values=values, value_input_option="RAW")
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M") + " UTC"
+
+    tot_p = sum(int(r[1]) for r in summary)
+    tot_in = sum(int(r[2]) for r in summary)
+    tot_out = sum(int(r[3]) for r in summary)
+
+    values = [["Category", "Products", "In Stock", "Sold Out"]]
+    values += [[r[0], r[1], r[2], r[3]] for r in summary]
+    values += [["TOTAL", tot_p, tot_in, tot_out]]
+    values += [["", "", "", ""]]
+    values += [["Last updated", now, "", ""]]
+    values += [["Source", f'=HYPERLINK("{BASE_URL}","{BASE_URL}")', "", ""]]
+
+    # USER_ENTERED so the HYPERLINK formula renders as a clickable link.
+    ws.update(range_name="A1", values=values, value_input_option="USER_ENTERED")
     ws.freeze(rows=1)
+    try:
+        ws.format("A1:D1", {"textFormat": {"bold": True}})
+        total_row = 1 + len(summary) + 1
+        ws.format(f"A{total_row}:D{total_row}", {"textFormat": {"bold": True}})
+    except Exception:
+        pass
+
+    # Pin Summary as the first tab and clear out the old _Run Log if present.
+    try:
+        others = [w for w in spreadsheet.worksheets() if w.id != ws.id]
+        spreadsheet.reorder_worksheets([ws] + others)
+    except Exception:
+        pass
+    try:
+        spreadsheet.del_worksheet(spreadsheet.worksheet("_Run Log"))
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -447,10 +484,12 @@ def main():
                 deduped.append(r)
 
         write_tab(spreadsheet, tab_name, deduped)
-        summary.append([sanitize_tab(tab_name), len(deduped)])
+        sold = sum(1 for r in deduped if is_sold_out(r[3]))
+        in_stock = len(deduped) - sold
+        summary.append([sanitize_tab(tab_name), len(deduped), in_stock, sold])
         time.sleep(1)
 
-    write_run_log(spreadsheet, summary)
+    write_summary(spreadsheet, summary)
     total = sum(s[1] for s in summary)
     log.info("Done. %s products across %s categories.", total, len(summary))
 
