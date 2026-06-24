@@ -78,7 +78,7 @@ REQUEST_TIMEOUT = 90           # seconds (unlocker + JS render is slow)
 MAX_RETRIES     = 2            # js_render succeeds on attempt 1; this is just transient-error insurance
 RETRY_BACKOFF   = 3            # seconds, multiplied by attempt number
 
-HEADER_ROW = ["Product Name", "Product Link", "Price", "Availability"]
+HEADER_ROW = ["Product Name", "Product Link", "Price", "Availability", "Image"]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -166,7 +166,12 @@ def extract_json(text: str):
 
 
 def format_price(prices: dict) -> str:
-    """Build a human-readable price string from Store API 'prices' object."""
+    """Build a price string from the Store API 'prices' object.
+
+    The Store API already positions the currency text inside currency_prefix /
+    currency_suffix, so we use those directly (prefix + number + suffix). We only
+    fall back to the bare symbol/code if both are empty.
+    """
     try:
         raw = prices.get("price")
         if raw in (None, ""):
@@ -178,11 +183,19 @@ def format_price(prices: dict) -> str:
         num = f"{value:,.{minor}f}"
         if ts != "," or ds != ".":
             num = num.replace(",", "\0").replace(".", ds).replace("\0", ts)
-        symbol = prices.get("currency_symbol") or prices.get("currency_code") or ""
-        prefix = prices.get("currency_prefix", "")
-        suffix = prices.get("currency_suffix", "")
-        out = f"{prefix}{symbol}{num}{suffix}".strip()
-        return out or f"{symbol} {num}".strip()
+        prefix = prices.get("currency_prefix", "") or ""
+        suffix = prices.get("currency_suffix", "") or ""
+        if not prefix and not suffix:
+            sym = prices.get("currency_symbol") or prices.get("currency_code") or ""
+            suffix = f" {sym}" if sym else ""
+        out = re.sub(r"\s+", " ", html.unescape(f"{prefix}{num}{suffix}")).strip()
+        # Some stores set BOTH a prefix and suffix currency token (e.g. "EGP16,000 EGP").
+        # Collapse the duplicate, keeping a single trailing token.
+        code = (prices.get("currency_code") or "").strip()
+        if code and out.count(code) > 1:
+            out = re.sub(r"\s+", " ", out.replace(code, "")).strip()
+            out = f"{out} {code}".strip()
+        return out
     except (ValueError, TypeError):
         return str(prices.get("price", ""))
 
@@ -190,7 +203,9 @@ def format_price(prices: dict) -> str:
 def availability_text(item: dict) -> str:
     sa = item.get("stock_availability") or {}
     if isinstance(sa, dict) and sa.get("text"):
-        return sa["text"].strip()
+        txt = html.unescape(re.sub(r"<[^>]+>", "", sa["text"])).strip()
+        if txt:
+            return txt
     low = item.get("low_stock_remaining")
     if low:
         return f"Only {low} left in stock"
@@ -201,6 +216,23 @@ def availability_text(item: dict) -> str:
     if item.get("is_purchasable") is False:
         return "Unavailable"
     return "Unknown"
+
+
+def image_cell(item: dict) -> str:
+    """Return a Google Sheets =IMAGE() formula for the product's first image."""
+    imgs = item.get("images") or []
+    if imgs and isinstance(imgs, list):
+        url = (imgs[0].get("thumbnail") or imgs[0].get("src") or "").strip()
+        if url.startswith("http"):
+            return f'=IMAGE("{url.replace(chr(34), "%22")}")'
+    return ""
+
+
+def safe_cell(v):
+    """Neutralize accidental formula injection in text cells (names, etc.)."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@"):
+        return "'" + v
+    return v
 
 
 # --------------------------------------------------------------------------- #
@@ -245,6 +277,7 @@ def fetch_products_by_category_id(client: ZenRowsClient, cat_id: int) -> list:
                 (item.get("permalink") or "").strip(),
                 format_price(item.get("prices") or {}),
                 availability_text(item),
+                image_cell(item),
             ])
         log.info("    page %s -> %s products (running total %s)",
                  page, len(data), len(rows))
@@ -323,7 +356,13 @@ def scrape_category_html(client: ZenRowsClient, slug: str) -> list:
             else:
                 avail = "Unknown"
 
-            rows.append([name, link, price, avail])
+            img_el = card.select_one("img")
+            img_url = ""
+            if img_el:
+                img_url = (img_el.get("data-src") or img_el.get("src") or "").strip()
+            img_cell = f'=IMAGE("{img_url.replace(chr(34), "%22")}")' if img_url.startswith("http") else ""
+
+            rows.append([name, link, price, avail, img_cell])
             new += 1
 
         if new == 0:
@@ -373,9 +412,18 @@ def write_tab(spreadsheet, tab_name: str, rows: list):
         needed = max(len(rows) + 10, 100)
         ws = spreadsheet.add_worksheet(title=tab_name, rows=needed, cols=len(HEADER_ROW))
 
-    values = [HEADER_ROW] + rows
-    ws.update(range_name="A1", values=values, value_input_option="RAW")
+    # Sanitize the four text columns against formula injection; keep the image
+    # formula (col 5) intact. USER_ENTERED so =IMAGE() renders as a thumbnail.
+    safe_rows = [[safe_cell(c) for c in r[:4]] + [r[4] if len(r) > 4 else ""]
+                 for r in rows]
+    values = [HEADER_ROW] + safe_rows
+    ws.update(range_name="A1", values=values, value_input_option="USER_ENTERED")
     ws.freeze(rows=1)
+    # Give the image column and rows enough size for thumbnails to show.
+    try:
+        ws.format("E:E", {"horizontalAlignment": "CENTER"})
+    except Exception:
+        pass
     log.info("  wrote %s rows to tab '%s'", len(rows), tab_name)
 
 
@@ -434,6 +482,15 @@ def write_summary(spreadsheet, summary: list):
         spreadsheet.del_worksheet(spreadsheet.worksheet("_Run Log"))
     except Exception:
         pass
+    # Remove stale tabs left over from the first run, whose names were
+    # HTML-encoded (e.g. "Lenses &amp; Accessories"). Current runs name them
+    # cleanly ("Lenses & Accessories"), so anything containing "&amp;" is an orphan.
+    for w in list(spreadsheet.worksheets()):
+        if "&amp;" in w.title:
+            try:
+                spreadsheet.del_worksheet(w)
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------- #
