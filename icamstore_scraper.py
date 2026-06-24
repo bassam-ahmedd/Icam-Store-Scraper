@@ -78,7 +78,8 @@ REQUEST_TIMEOUT = 90           # seconds (unlocker + JS render is slow)
 MAX_RETRIES     = 2            # js_render succeeds on attempt 1; this is just transient-error insurance
 RETRY_BACKOFF   = 3            # seconds, multiplied by attempt number
 
-HEADER_ROW = ["Product Name", "Product Link", "Price", "Availability", "Image"]
+HEADER_ROW = ["Product Name", "Product Link", "Price", "Availability",
+              "Key Features", "Description", "Image"]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -218,6 +219,32 @@ def availability_text(item: dict) -> str:
     return "Unknown"
 
 
+def html_to_text(raw: str, max_len: int = 15000) -> str:
+    """Convert WooCommerce HTML (description / short_description) to readable text.
+
+    Each paragraph / heading / table row becomes one line; list items become
+    bullet lines. Inline markup is flattened, whitespace collapsed, length capped.
+    """
+    if not raw:
+        return ""
+    soup = BeautifulSoup(html.unescape(raw), "html.parser")
+    lines = []
+    for el in soup.find_all(["li", "p", "h1", "h2", "h3", "h4", "h5", "h6", "tr"]):
+        if el.name == "p" and el.find_parent("li"):
+            continue  # avoid double-counting paragraphs nested in list items
+        t = re.sub(r"\s+", " ", el.get_text(" ", strip=True)).strip()
+        if not t:
+            continue
+        lines.append(("• " + t) if el.name == "li" else t)
+    text = "\n".join(lines)
+    if not text:  # content wasn't in block tags (e.g. bare text / <br> only)
+        text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) > max_len:
+        text = text[:max_len].rstrip() + " …"
+    return text
+
+
 def image_cell(item: dict) -> str:
     """Return a Google Sheets =IMAGE() formula for the product's first image."""
     imgs = item.get("images") or []
@@ -277,6 +304,8 @@ def fetch_products_by_category_id(client: ZenRowsClient, cat_id: int) -> list:
                 (item.get("permalink") or "").strip(),
                 format_price(item.get("prices") or {}),
                 availability_text(item),
+                html_to_text(item.get("short_description") or ""),
+                html_to_text(item.get("description") or ""),
                 image_cell(item),
             ])
         log.info("    page %s -> %s products (running total %s)",
@@ -362,7 +391,7 @@ def scrape_category_html(client: ZenRowsClient, slug: str) -> list:
                 img_url = (img_el.get("data-src") or img_el.get("src") or "").strip()
             img_cell = f'=IMAGE("{img_url.replace(chr(34), "%22")}")' if img_url.startswith("http") else ""
 
-            rows.append([name, link, price, avail, img_cell])
+            rows.append([name, link, price, avail, "", "", img_cell])
             new += 1
 
         if new == 0:
@@ -412,16 +441,16 @@ def write_tab(spreadsheet, tab_name: str, rows: list):
         needed = max(len(rows) + 10, 100)
         ws = spreadsheet.add_worksheet(title=tab_name, rows=needed, cols=len(HEADER_ROW))
 
-    # Sanitize the four text columns against formula injection; keep the image
-    # formula (col 5) intact. USER_ENTERED so =IMAGE() renders as a thumbnail.
-    safe_rows = [[safe_cell(c) for c in r[:4]] + [r[4] if len(r) > 4 else ""]
+    # Sanitize the six text columns against formula injection; keep the image
+    # formula (col 7 / G) intact. USER_ENTERED so =IMAGE() renders as a thumbnail.
+    safe_rows = [[safe_cell(c) for c in r[:6]] + [r[6] if len(r) > 6 else ""]
                  for r in rows]
     values = [HEADER_ROW] + safe_rows
     ws.update(range_name="A1", values=values, value_input_option="USER_ENTERED")
     ws.freeze(rows=1)
-    # Give the image column and rows enough size for thumbnails to show.
+    # Center the image column (G) so thumbnails sit nicely.
     try:
-        ws.format("E:E", {"horizontalAlignment": "CENTER"})
+        ws.format("G:G", {"horizontalAlignment": "CENTER"})
     except Exception:
         pass
     log.info("  wrote %s rows to tab '%s'", len(rows), tab_name)
