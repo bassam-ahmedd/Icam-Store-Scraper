@@ -1,4 +1,4 @@
-name: Icam Store Scrape
+name: Icam Store Scraper
 
 on:
   schedule:
