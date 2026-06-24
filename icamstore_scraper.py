@@ -75,8 +75,8 @@ PROXY_COUNTRY   = os.environ.get("PROXY_COUNTRY", "ae").strip()
 
 PER_PAGE        = 100          # Store API max page size
 REQUEST_TIMEOUT = 90           # seconds (unlocker + JS render is slow)
-MAX_RETRIES     = 3
-RETRY_BACKOFF   = 5            # seconds, multiplied by attempt number
+MAX_RETRIES     = 2            # js_render succeeds on attempt 1; this is just transient-error insurance
+RETRY_BACKOFF   = 3            # seconds, multiplied by attempt number
 
 HEADER_ROW = ["Product Name", "Product Link", "Price", "Availability"]
 
@@ -108,35 +108,35 @@ class ZenRowsClient:
         self.session = requests.Session()
 
     def get(self, url: str, js_render: bool = True) -> str:
-        """Fetch a URL through ZenRows, retrying with escalating settings."""
-        # Ladder: try residential-proxy-only first (cheap, returns clean JSON for
-        # API routes), then escalate to full JS rendering if we still hit the
-        # Cloudflare interstitial.
-        attempts = []
-        if not js_render:
-            attempts.append({"premium_proxy": "true"})
-        attempts.append({"premium_proxy": "true", "js_render": "true"})
+        """Fetch a URL through ZenRows.
 
+        icamstore.net challenges *every* route (API included), so js_render +
+        premium_proxy is the only combination that works. We go straight to it
+        instead of wasting attempts/credits on a cheaper tier that always 422s.
+        """
         last_err = None
-        for settings in attempts:
-            for attempt in range(1, MAX_RETRIES + 1):
-                params = {"apikey": self.api_key, "url": url, **settings}
-                if self.proxy_country:
-                    params["proxy_country"] = self.proxy_country
-                try:
-                    r = self.session.get(
-                        self.ENDPOINT, params=params, timeout=REQUEST_TIMEOUT
-                    )
-                    body = r.text
-                    if r.status_code == 200 and "Just a moment" not in body:
-                        return body
-                    last_err = f"status={r.status_code} challenged={'Just a moment' in body}"
-                    log.warning("  fetch attempt %s (%s) -> %s",
-                                attempt, settings, last_err)
-                except requests.RequestException as e:
-                    last_err = repr(e)
-                    log.warning("  fetch attempt %s (%s) error: %s",
-                                attempt, settings, last_err)
+        for attempt in range(1, MAX_RETRIES + 1):
+            params = {
+                "apikey": self.api_key,
+                "url": url,
+                "premium_proxy": "true",
+                "js_render": "true",
+            }
+            if self.proxy_country:
+                params["proxy_country"] = self.proxy_country
+            try:
+                r = self.session.get(
+                    self.ENDPOINT, params=params, timeout=REQUEST_TIMEOUT
+                )
+                body = r.text
+                if r.status_code == 200 and "Just a moment" not in body:
+                    return body
+                last_err = f"status={r.status_code}"
+                log.warning("  fetch attempt %s -> %s", attempt, last_err)
+            except requests.RequestException as e:
+                last_err = repr(e)
+                log.warning("  fetch attempt %s error: %s", attempt, last_err)
+            if attempt < MAX_RETRIES:
                 time.sleep(RETRY_BACKOFF * attempt)
         raise RuntimeError(f"Failed to fetch {url} ({last_err})")
 
@@ -221,7 +221,8 @@ def fetch_category_map(client: ZenRowsClient) -> dict:
         for c in data:
             slug = c.get("slug")
             if slug:
-                cat_map[slug] = {"id": c.get("id"), "name": c.get("name") or slug}
+                cat_map[slug] = {"id": c.get("id"),
+                                 "name": html.unescape(c.get("name") or slug)}
         if len(data) < 100:
             break
         page += 1
@@ -240,7 +241,7 @@ def fetch_products_by_category_id(client: ZenRowsClient, cat_id: int) -> list:
             break
         for item in data:
             rows.append([
-                (item.get("name") or "").strip(),
+                html.unescape((item.get("name") or "").strip()),
                 (item.get("permalink") or "").strip(),
                 format_price(item.get("prices") or {}),
                 availability_text(item),
