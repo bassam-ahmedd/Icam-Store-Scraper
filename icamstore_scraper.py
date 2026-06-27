@@ -476,7 +476,7 @@ def write_summary(spreadsheet, summary: list):
     from datetime import datetime
     try:
         import zoneinfo
-        now = datetime.now(zoneinfo.ZoneInfo("Asia/Dubai")).strftime("%Y-%m-%d %H:%M") + " +04"
+        now = datetime.now(zoneinfo.ZoneInfo("Africa/Cairo")).strftime("%Y-%m-%d %H:%M %z")
     except Exception:
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M") + " UTC"
 
@@ -526,7 +526,29 @@ def write_summary(spreadsheet, summary: list):
 # Main
 # --------------------------------------------------------------------------- #
 
+def cairo_schedule_guard():
+    """On scheduled (cron) triggers, only proceed at 05:xx or 17:xx Cairo time.
+
+    GitHub cron is UTC and DST-unaware, so the workflow lists both the summer and
+    winter UTC times for 05:30/17:30 Cairo. This guard lets only the two correct
+    triggers per day actually run, year-round, with no manual seasonal changes.
+    Manual ('workflow_dispatch') and local runs always proceed.
+    """
+    if os.environ.get("GITHUB_EVENT_NAME", "") != "schedule":
+        return
+    try:
+        import zoneinfo
+        from datetime import datetime
+        hour = datetime.now(zoneinfo.ZoneInfo("Africa/Cairo")).hour
+    except Exception:
+        return  # if tz resolution fails, don't block the run
+    if hour not in (5, 17):
+        log.info("Cairo guard: current Cairo hour is %s (not 5 or 17) - skipping this trigger.", hour)
+        sys.exit(0)
+
+
 def main():
+    cairo_schedule_guard()
     if not SHEET_ID:
         log.error("SHEET_ID env var is required.")
         sys.exit(1)
