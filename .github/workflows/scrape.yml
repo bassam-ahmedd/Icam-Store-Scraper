@@ -2,11 +2,11 @@ name: icamstore daily scrape
 
 on:
   schedule:
-    # Twice daily at 05:30 and 17:30 Africa/Cairo. GitHub cron is UTC with no DST
-    # awareness, so both the summer (EEST, UTC+3) and winter (EET, UTC+2) UTC times
-    # are listed; the script's Cairo-time guard runs only the correct two each day.
-    - cron: "0 3 * * *"     # 05:30 Cairo in summer (EEST)
-    - cron: "0 15 * * *"     # 05:30 Cairo in winter (EET)
+    # Twice daily. GitHub often delays scheduled runs by hours, so we no longer
+    # gate on an exact Cairo hour — every scheduled run scrapes. These two UTC
+    # times land around morning/evening Cairo; delays just shift them a bit.
+    - cron: "0 3 * * *"
+    - cron: "0 15 * * *"
   workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
 
 concurrency:
